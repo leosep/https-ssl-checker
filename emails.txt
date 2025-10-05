@@ -1,0 +1,3 @@
+test@example.com
+dummy@domain.org
+sample@email.net
