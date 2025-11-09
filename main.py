@@ -66,6 +66,14 @@ def check_ssl_certificate(url):
             ssl_sock.close()
             return False
 
+        # Check if certificate is self-signed
+        cert_der = ssl_sock.getpeercert(binary_form=True)
+        cert_obj = x509.load_der_x509_certificate(cert_der, default_backend())
+        if cert_obj.subject == cert_obj.issuer:
+            logging.warning(f"Certificate for {url} is self-signed (not issued by a trusted CA)")
+            ssl_sock.close()
+            return False
+
         # Check for revocation using certificate transparency logs
         cert_der = ssl_sock.getpeercert(binary_form=True)
         cert_obj = x509.load_der_x509_certificate(cert_der, default_backend())
