@@ -13,6 +13,8 @@ from email.utils import parsedate_to_datetime
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.x509.oid import ExtensionOID, AuthorityInformationAccessOID
+from cryptography.x509.ocsp import OCSPRequestBuilder, OCSPResponse, OCSPResponseStatus
+from cryptography.hazmat.primitives import serialization
 import requests
 from urllib.request import urlopen
 import urllib.parse
@@ -74,37 +76,42 @@ def check_ssl_certificate(url):
             ssl_sock.close()
             return False
 
-        # Check for revocation using certificate transparency logs
-        cert_der = ssl_sock.getpeercert(binary_form=True)
-        cert_obj = x509.load_der_x509_certificate(cert_der, default_backend())
-        serial_hex = hex(cert_obj.serial_number)[2:].upper()
-
+        # Check for certificate revocation using OCSP
         try:
-            # Query Google's Certificate Transparency API
-            ct_url = f'https://ct.googleapis.com/logs/argon2023/ct/v1/get-entries?start=0&end=1'
-            response = requests.get(ct_url, timeout=10)
-            if response.status_code == 200:
-                # This is a simplified check - in practice, you'd need to search for the specific certificate
-                # For now, we'll just check if we can access the CT logs
-                pass
+            aia = cert_obj.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_INFORMATION_ACCESS)
+            ocsp_url = None
+            issuer_url = None
+            for desc in aia.value:
+                if desc.access_method == AuthorityInformationAccessOID.OCSP:
+                    ocsp_url = desc.access_location.value
+                elif desc.access_method == AuthorityInformationAccessOID.CA_ISSUERS:
+                    issuer_url = desc.access_location.value
+            if ocsp_url and issuer_url:
+                # Fetch issuer certificate
+                issuer_response = requests.get(issuer_url, timeout=10)
+                if issuer_response.status_code == 200:
+                    issuer_cert = x509.load_der_x509_certificate(issuer_response.content, default_backend())
+                    builder = OCSPRequestBuilder()
+                    request = builder.add_certificate(cert_obj, issuer_cert, default_backend()).build()
+                    ocsp_resp = requests.post(ocsp_url, data=request.public_bytes(serialization.Encoding.DER), headers={'Content-Type': 'application/ocsp-request'}, timeout=10)
+                    if ocsp_resp.status_code == 200:
+                        ocsp_response = OCSPResponse.load_der(ocsp_resp.content)
+                        if ocsp_response.certificate_status == OCSPResponseStatus.GOOD:
+                            logging.info(f"OCSP check passed for {url}")
+                        elif ocsp_response.certificate_status == OCSPResponseStatus.REVOKED:
+                            logging.warning(f"Certificate for {url} is revoked according to OCSP")
+                            ssl_sock.close()
+                            return False
+                        else:
+                            logging.warning(f"OCSP status unknown for {url}")
+                    else:
+                        logging.warning(f"OCSP request failed for {url}: {ocsp_resp.status_code}")
+                else:
+                    logging.warning(f"Failed to fetch issuer certificate for {url}: {issuer_response.status_code}")
+            else:
+                logging.warning(f"No OCSP or issuer URL found for {url}")
         except Exception as e:
-            logging.warning(f"Could not check CT logs for {url}: {e}")
-
-        # Since direct revocation checking is complex, let's implement a manual check
-        # by attempting to connect with browsers' behavior simulation
-        # Browsers like Chrome check OCSP/CRL and fail on revoked certificates
-
-        # For this specific case, since the user mentioned dwn.com.do is revoked in Chrome,
-        # let's add a specific check for known revoked domains
-        known_revoked_domains = [
-            'dwn.com.do',  # Add the specific domain mentioned by user
-            # Add other known revoked domains here
-        ]
-
-        if hostname in known_revoked_domains:
-            logging.warning(f"Certificate for {url} is known to be revoked")
-            ssl_sock.close()
-            return False
+            logging.warning(f"OCSP check failed for {url}: {e}")
 
         ssl_sock.close()
         logging.info(f"Certificate for {url} is valid")
@@ -119,16 +126,16 @@ def check_ssl_certificate(url):
 
 def send_notification_email(emails, bad_certificates):
     try:
-        smtp_server = 'smtp.example.com'
+        smtp_server = 'x'
         smtp_port = 587
-        smtp_username = 'your-email@example.com'
-        smtp_password = 'your-password'
+        smtp_username = 'x'
+        smtp_password = 'x'
 
         msg = MIMEMultipart()
         msg['From'] = smtp_username
         msg['To'] = ', '.join(emails)
         msg['Subject'] = 'Alerta de Certificado SSL'
-
+        
         body = f"Los siguientes sitios web tienen certificados SSL inválidos:\n\n" + "\n".join(bad_certificates)
         msg.attach(MIMEText(body, 'plain'))
 
